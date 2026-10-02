@@ -33,13 +33,13 @@ Emulador en software, escrito en Python, que reproduce el funcionamiento interno
 
 | Nombre | Rol principal |
 | --- | --- |
-| Andrés Mauricio Navarro | *(completar)* |
-| *(Integrante 2)* | *(completar)* |
-| *(Integrante 3)* | *(completar)* |
+| Andrés Mauricio Navarro | 
+| Daniel Estaban mataboy |
+| Nicolas Tintinago |
 
-**Docente:** *(completar)*
+**Docente: ARMANDO ARBOLEDA DUQUE** 
 **Asignatura:** Arquitectura de Computadores
-**Periodo académico:** *(completar)*
+
 
 ---
 
@@ -176,19 +176,6 @@ emulador-von-neumann/
 - Opcional: PyQt5/PyQt6 si el equipo decide usarlo en lugar de Tkinter
 - Editor recomendado: Visual Studio Code
 
-**Instalación**
-
-```bash
-git clone <URL-del-repositorio>
-cd emulador-von-neumann
-
-# (Opcional) entorno virtual
-python -m venv venv
-source venv/bin/activate        # Linux / macOS
-venv\Scripts\activate           # Windows
-
-pip install -r requirements.txt
-```
 
 ---
 
