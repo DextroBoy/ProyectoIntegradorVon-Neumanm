@@ -33,8 +33,20 @@ TITLES = {"MAR": "MAR", "PC": "PC  (contador)", "MDR": "MDR", "IR": "IR  (instru
 LINKS = [("PC", "MAR"), ("IR", "PC"), ("IR", "MAR"), ("IR", "CU"), ("MDR", "IR"),
          ("MEM", "MDR"), ("MAR", "MEM"), ("MDR", "ALU"), ("MDR", "AC"),
          ("AC", "ALU"), ("IN", "AC"), ("AC", "OUT")]
-PHASE_PILLS = {"FETCH": (575, 50, 695, 88), "DECODE": (575, 100, 695, 138),
-               "EXECUTE": (575, 150, 695, 188), "HALT": (575, 200, 695, 238)}
+
+# --- Enhanced phase pipeline layout ---
+_PIPE_Y0 = 50       # top of pipeline area
+_PIPE_H  = 36       # pill height
+_PIPE_GAP = 6       # gap between pills
+_PIPE_X0 = 570      # left edge
+_PIPE_W  = 130      # pill width
+_ARROW_W = 16       # arrow connector width
+
+PHASE_PILLS = {}
+_py = _PIPE_Y0
+for _pname in ("FETCH", "DECODE", "EXECUTE", "HALT"):
+    PHASE_PILLS[_pname] = (_PIPE_X0, _py, _PIPE_X0 + _PIPE_W, _py + _PIPE_H)
+    _py += _PIPE_H + _PIPE_GAP
 
 
 class ArchView:
@@ -44,6 +56,11 @@ class ArchView:
         self.on_click = on_click
         self.rect, self.value, self.pills = {}, {}, {}
         self.hl = []
+        self._glow_items = []      # items for glow/flash effects
+        self._anim_after_ids = []  # scheduled after IDs for animations
+        self._prev_values = {}     # previous register values for flash detection
+        self._cycle_count = 0      # cycle counter
+        self._completed_phases = set()  # phases completed in the current cycle
         self._draw_static()
         self.canvas.bind("<Button-1>", self._click)
 
@@ -96,24 +113,144 @@ class ArchView:
                                               fill=C["text"], font=(MONO, 11, "bold"))
         self.flags = cv.create_text(*self._s(360, 396), text="Z = 1    N = 0",
                                     fill=C["muted"], font=(MONO, 9))
-        for name, (x1, y1, x2, y2) in PHASE_PILLS.items():
-            r = cv.create_rectangle(*self._s(x1, y1, x2, y2), fill=C["box"], outline=C["line"], width=2)
+
+        # --- Enhanced pipeline phase pills with arrows ---
+        phase_order = ["FETCH", "DECODE", "EXECUTE", "HALT"]
+        cv.create_text(*self._s(_PIPE_X0, _PIPE_Y0 - 14), text="FASE DEL CICLO", anchor="w",
+                       fill=C["muted"], font=(SANS, 7, "bold"))
+        # Draw cycle counter label
+        self._cycle_label = cv.create_text(
+            *self._s(_PIPE_X0 + _PIPE_W, _PIPE_Y0 - 14), text="", anchor="e",
+            fill=C["accent"], font=(SANS, 8, "bold"))
+
+        for idx, name in enumerate(phase_order):
+            x1, y1, x2, y2 = PHASE_PILLS[name]
+
+            # Draw connecting arrow between pills (except before first)
+            if idx > 0 and idx < 3:  # arrows between FETCH→DECODE, DECODE→EXECUTE
+                prev_name = phase_order[idx - 1]
+                _, _, _, prev_y2 = PHASE_PILLS[prev_name]
+                mid_x = (x1 + x2) / 2
+                arr_y1 = prev_y2
+                arr_y2 = y1
+                self.hl.append(cv.create_line(
+                    *self._s(mid_x, arr_y1, mid_x, arr_y2),
+                    fill=C["line"], width=2, arrow=tk.LAST, arrowshape=(6, 8, 4)))
+            if idx == 3:  # arrow to HALT - special dashed
+                prev_name = phase_order[idx - 1]
+                _, _, _, prev_y2 = PHASE_PILLS[prev_name]
+                mid_x = (x1 + x2) / 2
+                cv.create_line(
+                    *self._s(mid_x, prev_y2, mid_x, y1),
+                    fill=C["line"], width=1, arrow=tk.LAST, dash=(3, 3),
+                    arrowshape=(6, 8, 4))
+
+            # Rounded-feel pill (rectangle with rounded corners simulated)
+            r = cv.create_rectangle(*self._s(x1, y1, x2, y2), fill=C["box"],
+                                    outline=C["line"], width=2)
             label = {"FETCH": "1 · FETCH", "DECODE": "2 · DECODE",
-                     "EXECUTE": "3 · EXECUTE", "HALT": "HALT"}[name]
+                     "EXECUTE": "3 · EXECUTE", "HALT": "■  HALT"}[name]
             t = cv.create_text(*self._s((x1 + x2) / 2, (y1 + y2) / 2), text=label,
                                fill=C["muted"], font=(SANS, 9, "bold"))
-            self.pills[name] = (r, t)
-        cv.create_text(*self._s(575, 38), text="FASE DEL CICLO", anchor="w",
-                       fill=C["muted"], font=(SANS, 7, "bold"))
-        self.info = cv.create_text(*self._s(575, 262), anchor="nw", width=int(125 * S),
+            # Checkmark for completed phases (initially hidden)
+            chk = cv.create_text(*self._s(x2 - 12, (y1 + y2) / 2), text="",
+                                 fill=C["green"], font=(SANS, 10, "bold"))
+            # Glow rectangle (behind the pill, initially hidden)
+            glow = cv.create_rectangle(*self._s(x1 - 3, y1 - 3, x2 + 3, y2 + 3),
+                                       outline="", width=0, state="hidden")
+            cv.tag_lower(glow, r)
+            self.pills[name] = (r, t, chk, glow)
+
+        # Draw loop-back arrow from EXECUTE back to FETCH
+        ex_x1, _, ex_x2, ex_y2 = PHASE_PILLS["EXECUTE"]
+        fe_x1, fe_y1, fe_x2, _ = PHASE_PILLS["FETCH"]
+        loop_x = _PIPE_X0 + _PIPE_W + 18
+        cv.create_line(
+            *self._s(ex_x2, (PHASE_PILLS["EXECUTE"][1] + ex_y2) / 2,
+                     loop_x, (PHASE_PILLS["EXECUTE"][1] + ex_y2) / 2,
+                     loop_x, (fe_y1 + PHASE_PILLS["FETCH"][3]) / 2,
+                     fe_x2, (fe_y1 + PHASE_PILLS["FETCH"][3]) / 2),
+            fill=C["muted"], width=2, arrow=tk.LAST, arrowshape=(8, 10, 5), smooth=True)
+        cv.create_text(*self._s(loop_x + 4, (fe_y1 + ex_y2) / 2),
+                       text="ciclo", anchor="w", fill=C["muted"], font=(SANS, 7))
+
+        # Step progress text
+        self._step_text = cv.create_text(
+            *self._s(_PIPE_X0, PHASE_PILLS["HALT"][3] + 14), anchor="nw",
+            text="", fill=C["text"], font=(SANS, 8))
+
+        self.info = cv.create_text(*self._s(_PIPE_X0, PHASE_PILLS["HALT"][3] + 32), anchor="nw",
+                                   width=int(125 * S),
                                    text="", fill=C["text"], font=(SANS, 9))
 
     # ------------------------------------------------------------------
+    def _cancel_anims(self):
+        """Cancel any pending animation callbacks."""
+        for aid in self._anim_after_ids:
+            try:
+                self.canvas.after_cancel(aid)
+            except (ValueError, tk.TclError):
+                pass
+        self._anim_after_ids.clear()
+        for item in self._glow_items:
+            try:
+                self.canvas.delete(item)
+            except tk.TclError:
+                pass
+        self._glow_items.clear()
+
+    def _flash_register(self, name, old_val, new_val):
+        """Create a brief flash effect on a register that changed value."""
+        cv = self.canvas
+        x1, y1, x2, y2 = BOXES[name]
+
+        # Show old value struck through (dimmed, slightly offset above)
+        if name not in ("MEM", "IN", "OUT"):
+            vy = (y1 + y2) / 2 + 6
+            old_text = cv.create_text(
+                *self._s((x1 + x2) / 2 - 8, vy - 10),
+                text=str(old_val), fill=C["red"], font=(MONO, 8),
+                stipple="gray50")
+            self._glow_items.append(old_text)
+            # Remove the old-value indicator after a delay
+            aid = cv.after(800, lambda: self._safe_delete(old_text))
+            self._anim_after_ids.append(aid)
+
+        # Bright border flash
+        glow_rect = cv.create_rectangle(
+            *self._s(x1 - 2, y1 - 2, x2 + 2, y2 + 2),
+            outline=C["cyan"], width=3)
+        self._glow_items.append(glow_rect)
+        # Fade the glow border after 500ms
+        aid = cv.after(500, lambda: self._safe_delete(glow_rect))
+        self._anim_after_ids.append(aid)
+
+    def _safe_delete(self, item):
+        """Safely delete a canvas item."""
+        try:
+            self.canvas.delete(item)
+        except tk.TclError:
+            pass
+        if item in self._glow_items:
+            self._glow_items.remove(item)
+
     def update(self, cpu, events, alu_last, in_queue):
         cv = self.canvas
+        # Clean up dynamic highlights but keep glow items (they self-delete)
         for item in self.hl:
             cv.delete(item)
         self.hl = []
+
+        # Track cycle count and completed phases
+        if cpu.phase == "FETCH" and self._prev_values.get("_phase") == "EXECUTE":
+            self._cycle_count += 1
+            self._completed_phases.clear()
+        elif cpu.phase == "FETCH" and not self._prev_values:
+            self._cycle_count = 1
+            self._completed_phases.clear()
+
+        if self._prev_values.get("_phase") and self._prev_values["_phase"] != cpu.phase:
+            self._completed_phases.add(self._prev_values["_phase"])
 
         values = {"PC": cpu.pc, "MAR": cpu.mar, "MDR": cpu.mdr, "IR": cpu.ir, "AC": cpu.ac,
                   "CU": cpu.mnemonic or "—", "ALU": alu_last,
@@ -121,25 +258,97 @@ class ArchView:
                   "IN": f"cola: {in_queue}" if in_queue else "—",
                   "OUT": str(cpu.output[-1]) if cpu.output else "—"}
         active = {e.dst for e in events}
+
+        # Detect changed registers and flash them
         for name, val in values.items():
+            str_val = str(val)
+            old_str = self._prev_values.get(name)
             on = name in active
-            cv.itemconfig(self.value[name], text=str(val), fill=C["green"] if on else C["text"])
+
+            if old_str is not None and old_str != str_val and on:
+                self._flash_register(name, old_str, str_val)
+
+            cv.itemconfig(self.value[name], text=str_val,
+                          fill=C["green"] if on else C["text"])
             cv.itemconfig(self.rect[name], outline=C["orange"] if on else C["line"],
                           width=3 if on else 2)
 
+        # Store current values for next comparison
+        self._prev_values = {name: str(val) for name, val in values.items()}
+        self._prev_values["_phase"] = cpu.phase
+
+        # Draw active data flow arrows with labels
         for e in events:
             if e.src == e.dst:
                 continue
             p1, p2 = self._edge(e.src, e.dst)
-            self.hl.append(cv.create_line(*p1, *p2, arrow=tk.LAST, width=3, fill=C["accent"],
-                                          arrowshape=(10, 12, 5)))
+            # Thicker, brighter arrow
+            self.hl.append(cv.create_line(*p1, *p2, arrow=tk.LAST, width=4,
+                                          fill=C["accent"],
+                                          arrowshape=(12, 14, 6)))
+            # Data label on the arrow - extract value from event text
+            label_text = self._extract_arrow_label(e)
+            if label_text:
+                mid_x = (p1[0] + p2[0]) / 2
+                mid_y = (p1[1] + p2[1]) / 2
+                # Background for label
+                bg = cv.create_rectangle(mid_x - 18, mid_y - 8,
+                                         mid_x + 18, mid_y + 8,
+                                         fill=C["panel"], outline=C["accent"], width=1)
+                lbl = cv.create_text(mid_x, mid_y, text=label_text,
+                                     fill=C["orange"], font=(MONO, 7, "bold"))
+                self.hl.append(bg)
+                self.hl.append(lbl)
 
         cv.itemconfig(self.flags, text=f"Z = {int(cpu.zero)}    N = {int(cpu.negative)}")
-        for name, (r, t) in self.pills.items():
+
+        # Update pipeline pills with enhanced visuals
+        phase_order = ["FETCH", "DECODE", "EXECUTE"]
+        for name, (r, t, chk, glow) in self.pills.items():
             on = name == cpu.phase
-            color = C["red"] if (on and name == "HALT") else C["accent"]
-            cv.itemconfig(r, fill=color if on else C["box"], outline=color if on else C["line"])
-            cv.itemconfig(t, fill="#ffffff" if on else C["muted"])
+            is_halt = name == "HALT"
+            completed = name in self._completed_phases and name != "HALT"
+
+            if on:
+                color = C["red"] if is_halt else C["accent"]
+                cv.itemconfig(r, fill=color, outline=color, width=3)
+                cv.itemconfig(t, fill="#ffffff")
+                cv.itemconfig(chk, text="")
+                # Show glow for current phase
+                cv.itemconfig(glow, state="normal", outline=color, width=2)
+            elif completed:
+                cv.itemconfig(r, fill="#1a3a2a", outline=C["green"], width=2)
+                cv.itemconfig(t, fill=C["green"])
+                cv.itemconfig(chk, text="✓")
+                cv.itemconfig(glow, state="hidden")
+            else:
+                cv.itemconfig(r, fill=C["box"], outline=C["line"], width=2)
+                cv.itemconfig(t, fill=C["muted"])
+                cv.itemconfig(chk, text="")
+                cv.itemconfig(glow, state="hidden")
+
+        # Update cycle counter
+        if self._cycle_count > 0:
+            cv.itemconfig(self._cycle_label, text=f"Ciclo #{self._cycle_count}")
+
+        # Update step progress text
+        if cpu.halted:
+            cv.itemconfig(self._step_text,
+                          text=f"■ HALT — {cpu.instructions_done} instr.",
+                          fill=C["red"])
+        else:
+            # Build a visual pipeline indicator: FETCH → DECODE → EXECUTE
+            parts = []
+            for ph in phase_order:
+                if ph == cpu.phase:
+                    parts.append(f"▶{ph}")
+                elif ph in self._completed_phases:
+                    parts.append(f"✓{ph}")
+                else:
+                    parts.append(f"  {ph}")
+            cv.itemconfig(self._step_text,
+                          text=" → ".join(parts),
+                          fill=C["text"])
 
         if cpu.error:
             cv.itemconfig(self.info, text="Error:\n" + cpu.error, fill=C["red"])
@@ -148,6 +357,25 @@ class ArchView:
             desc = DESCRIPTIONS.get(cpu.mnemonic, "") if cpu.phase in ("EXECUTE", "FETCH") and cpu.mnemonic else ""
             head = f"Instrucción\n{disassemble(cpu.ir)}" if cpu.mnemonic else "Sin instrucción"
             cv.itemconfig(self.info, text=f"{head}\n{desc}", fill=C["text"])
+
+    @staticmethod
+    def _extract_arrow_label(event):
+        """Extract a short value label from event text for display on arrows."""
+        text = event.text
+        # Look for patterns like (123) at the end
+        if "(" in text and text.rstrip().endswith(")"):
+            start = text.rfind("(")
+            val = text[start + 1:-1].strip()
+            if len(val) <= 8:
+                return f"={val}"
+        # Look for "= VALUE" patterns
+        if "= " in text:
+            parts = text.split("= ")
+            if len(parts) >= 2:
+                val = parts[-1].strip().rstrip(")")
+                if len(val) <= 8 and val.lstrip("-").isdigit():
+                    return f"={val}"
+        return ""
 
 
 # ======================================================================
@@ -180,13 +408,118 @@ class MemView:
                                            fill=C["muted"], font=(MONO, 7)))
         cv.bind("<Button-1>", self._click)
 
+        # Tooltip window
+        self._tooltip = None
+        self._tooltip_after = None
+        cv.bind("<Motion>", self._on_motion)
+        cv.bind("<Leave>", self._hide_tooltip)
+
+        # Flash tracking
+        self._flash_items = []
+        self._flash_after_ids = []
+        self._prev_mem_read = None
+        self._prev_mem_write = None
+
     def _click(self, e):
         c, r = (e.x - HDR) // CELL_W, (e.y - HDR) // CELL_H
         if 0 <= c < 10 and 0 <= r < 10:
             self.on_click(r * 10 + c)
 
+    def _addr_from_pos(self, x, y):
+        """Get memory address from canvas coordinates."""
+        c, r = (x - HDR) // CELL_W, (y - HDR) // CELL_H
+        if 0 <= c < 10 and 0 <= r < 10:
+            return r * 10 + c
+        return None
+
+    def _on_motion(self, e):
+        """Show tooltip on hover."""
+        addr = self._addr_from_pos(e.x, e.y)
+        if addr is None:
+            self._hide_tooltip()
+            return
+        # Cancel previous scheduled tooltip
+        if self._tooltip_after:
+            self.canvas.after_cancel(self._tooltip_after)
+        self._tooltip_after = self.canvas.after(200, lambda: self._show_tooltip(e, addr))
+
+    def _show_tooltip(self, e, addr):
+        """Display a tooltip with cell info."""
+        self._hide_tooltip()
+        if not hasattr(self, '_cpu_ref') or self._cpu_ref is None:
+            return
+        cpu = self._cpu_ref
+        word = cpu.mem[addr]
+        dis = disassemble(word)
+        kind_label = ""
+        if hasattr(self, '_prog_ref') and self._prog_ref:
+            kind = self._prog_ref.kinds.get(addr)
+            kind_label = {"code": "instrucción", "data": "dato"}.get(kind, "libre")
+        else:
+            kind_label = "libre"
+
+        tip_text = f"Dir: {addr:02d}  |  Valor: {word}\n{kind_label}  →  {dis}"
+
+        self._tooltip = tw = tk.Toplevel(self.canvas)
+        tw.wm_overrideredirect(True)
+        tw.wm_attributes("-topmost", True)
+        # Position near cursor
+        x_root = self.canvas.winfo_rootx() + e.x + 12
+        y_root = self.canvas.winfo_rooty() + e.y - 10
+        tw.wm_geometry(f"+{x_root}+{y_root}")
+        lbl = tk.Label(tw, text=tip_text, justify="left",
+                       bg="#1e2840", fg="#e8edf7", relief="solid", borderwidth=1,
+                       font=(MONO, 9), padx=6, pady=4)
+        lbl.pack()
+
+    def _hide_tooltip(self, _e=None):
+        """Hide the tooltip."""
+        if self._tooltip_after:
+            try:
+                self.canvas.after_cancel(self._tooltip_after)
+            except (ValueError, tk.TclError):
+                pass
+            self._tooltip_after = None
+        if self._tooltip:
+            try:
+                self._tooltip.destroy()
+            except tk.TclError:
+                pass
+            self._tooltip = None
+
+    def _flash_cell(self, addr, color):
+        """Briefly flash a cell with the given color."""
+        cv = self.canvas
+        r, c = divmod(addr, 10)
+        x1, y1 = HDR + c * CELL_W + 1, HDR + r * CELL_H + 1
+        flash = cv.create_rectangle(x1 - 1, y1 - 1, x1 + CELL_W, y1 + CELL_H,
+                                    outline=color, width=3)
+        self._flash_items.append(flash)
+        aid = cv.after(600, lambda: self._remove_flash(flash))
+        self._flash_after_ids.append(aid)
+
+    def _remove_flash(self, item):
+        try:
+            self.canvas.delete(item)
+        except tk.TclError:
+            pass
+        if item in self._flash_items:
+            self._flash_items.remove(item)
+
     def update(self, cpu, program):
         cv = self.canvas
+        # Store refs for tooltip
+        self._cpu_ref = cpu
+        self._prog_ref = program
+
+        # Detect memory read (MAR changed) and write for flash effects
+        if cpu.last_mem_write is not None and cpu.last_mem_write != self._prev_mem_write:
+            self._flash_cell(cpu.last_mem_write, C["orange"])
+        if cpu.mar != self._prev_mem_read and cpu.last_mem_write != cpu.mar:
+            self._flash_cell(cpu.mar, C["cyan"])
+        self._prev_mem_read = cpu.mar
+        self._prev_mem_write = cpu.last_mem_write
+
         for a in range(MEM_SIZE):
             kind = program.kinds.get(a) if program else None
             word = cpu.mem[a]

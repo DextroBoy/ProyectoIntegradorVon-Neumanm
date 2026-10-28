@@ -22,6 +22,35 @@ from gui.views import (C, MONO, SANS, ArchView, AutomatonView,  # noqa: E402
 PROG_DIR = os.path.join(ROOT, "programas")
 SPEEDS = {1: 1000, 2: 700, 3: 450, 4: 300, 5: 200, 6: 120, 7: 70, 8: 40, 9: 15, 10: 1}
 
+# --- Color-coded event categories for the micro-operations log ---
+_EVENT_CATEGORIES = {
+    "mem_read":  {"prefix": "📖", "color": "#4fd8e8", "tag": "ev_memr"},     # cyan
+    "mem_write": {"prefix": "📝", "color": "#ffb454", "tag": "ev_memw"},     # orange
+    "alu":       {"prefix": "⚡", "color": "#3ddc97", "tag": "ev_alu"},      # green
+    "jump":      {"prefix": "↪",  "color": "#b48cff", "tag": "ev_jump"},     # purple
+    "control":   {"prefix": "🔧", "color": "#4f9dff", "tag": "ev_ctrl"},     # accent/blue
+    "io":        {"prefix": "📟", "color": "#e8edf7", "tag": "ev_io"},       # text
+}
+
+
+def _classify_event(event):
+    """Classify a CPU event into a category for color-coding."""
+    text = event.text.lower()
+    src, dst = event.src, event.dst
+    if dst == "MEM" or src == "MEM":
+        if "←" in event.text and dst == "MEM":
+            return "mem_write"
+        return "mem_read"
+    if src == "ALU" or dst == "ALU":
+        return "alu"
+    if "pc ←" in text and dst == "PC" and src != "PC":
+        return "jump"
+    if src in ("IN", "OUT") or dst in ("IN", "OUT"):
+        return "io"
+    if "salto" in text or "jump" in text:
+        return "jump"
+    return "control"
+
 
 class App(ctk.CTk):
     def __init__(self):
@@ -44,6 +73,11 @@ class App(ctk.CTk):
         self.last_transition = "—"
         self.last_phase = None
         self.wait_shown = False
+        self._step_number = 0          # global step counter for console
+        self._input_flash_id = None    # for flashing input prompt
+        self._log_cycle_num = 0        # cycle number for log separators
+        self._log_last_phase = None    # track phase changes for log formatting
+        self._phase_history = []       # últimas transiciones visibles del ciclo
 
         self._build_topbar()
         self.tabs = ctk.CTkTabview(self, fg_color=C["bg"])
@@ -116,51 +150,106 @@ class App(ctk.CTk):
         self._btn(row2, "Ensamblar", self.assemble_current, C["accent"], 110).pack(side="left")
         self._btn(row2, "Guardar", self.save_file, width=80).pack(side="left", padx=6)
 
+        # --- Console section with enhanced labels ---
         ctk.CTkLabel(left, text="CONSOLA  (haz clic y escribe; Enter envía)", text_color=C["muted"],
                      font=(SANS, 10, "bold")).pack(anchor="w", padx=12, pady=(12, 2))
         self.console = ctk.CTkTextbox(left, width=290, height=110, fg_color=C["bg"],
                                       font=(MONO, 12), border_width=1, border_color=C["line"])
         self.console.pack(fill="x", padx=10)
         self.console.tag_config("out", foreground=C["green"])
+        self.console.tag_config("out_label", foreground=C["green"])
         self.console.tag_config("in", foreground=C["cyan"])
         self.console.tag_config("wait", foreground=C["orange"])
+        self.console.tag_config("step_num", foreground=C["muted"])
         self.console.configure(state="disabled")
         # lo que se teclee sobre la consola se redirige a la línea de entrada
         self.console.bind("<Key>", self._console_key)
         self.console.bind("<Button-1>", lambda e: self.after(1, self.entry.focus_set))
         row3 = ctk.CTkFrame(left, fg_color="transparent")
         row3.pack(fill="x", padx=10, pady=(6, 12))
-        ctk.CTkLabel(row3, text="›", text_color=C["cyan"], font=(MONO, 16, "bold"),
-                     width=14).pack(side="left")
+        self._input_prompt = ctk.CTkLabel(row3, text="›", text_color=C["cyan"],
+                                          font=(MONO, 16, "bold"), width=14)
+        self._input_prompt.pack(side="left")
         self.entry = ctk.CTkEntry(row3, placeholder_text="número + Enter", width=190,
                                   border_width=2, border_color=C["line"])
         self.entry.pack(side="left", padx=(2, 0))
         self.entry.bind("<Return>", self.submit_input)
         self._btn(row3, "Enviar", self.submit_input, width=70).pack(side="left", padx=6)
 
-        # --- columna central: arquitectura + bitácora
+        # --- columna central: arquitectura + explanation + bitácora
         mid = ctk.CTkFrame(tab, fg_color=C["panel"], corner_radius=10)
         mid.grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
         ctk.CTkLabel(mid, text="ARQUITECTURA  (flechas = flujo de datos · clic en un componente = explicación)",
                      text_color=C["muted"], font=(SANS, 10, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
         self.arch = ArchView(mid, self.show_component)
         self.arch.canvas.pack(padx=10, pady=4)
-        self.note_title = ctk.CTkLabel(mid, text="", text_color=C["cyan"], font=(SANS, 12, "bold"),
-                                       anchor="w")
-        self.note_title.pack(fill="x", padx=12)
-        self.note_box = ctk.CTkTextbox(mid, height=84, fg_color=C["bg"], text_color=C["text"],
-                                       font=(SANS, 12), wrap="word", border_width=1,
-                                       border_color=C["cyan"])
-        self.note_box.pack(fill="x", padx=10, pady=(2, 6))
+
+        # --- Instruction counter widget ---
+        instr_frame = ctk.CTkFrame(mid, fg_color=C["bg"], corner_radius=6)
+        instr_frame.pack(fill="x", padx=10, pady=(2, 4))
+        self._instr_counter = ctk.CTkLabel(
+            instr_frame, text="Instrucciones ejecutadas: 0",
+            text_color=C["text"], font=(MONO, 11, "bold"), anchor="w")
+        self._instr_counter.pack(side="left", padx=8, pady=4)
+        self._instr_current = ctk.CTkLabel(
+            instr_frame, text="",
+            text_color=C["orange"], font=(MONO, 11), anchor="w")
+        self._instr_current.pack(side="left", padx=(12, 4), pady=4)
+        self._instr_coverage = ctk.CTkLabel(
+            instr_frame, text="",
+            text_color=C["green"], font=(SANS, 10), anchor="e")
+        self._instr_coverage.pack(side="right", padx=8, pady=4)
+
+        # --- Execution progress strip ---
+        progress_frame = ctk.CTkFrame(mid, fg_color=C["bg"], corner_radius=6)
+        progress_frame.pack(fill="x", padx=10, pady=(0, 4))
+        self._progress_title = ctk.CTkLabel(
+            progress_frame, text="AVANCE DEL CICLO",
+            text_color=C["muted"], font=(SANS, 9, "bold"), anchor="w")
+        self._progress_title.pack(side="left", padx=(8, 6), pady=4)
+        self._progress_phases = ctk.CTkLabel(
+            progress_frame, text="FETCH",
+            text_color=C["accent"], font=(MONO, 10, "bold"), anchor="w")
+        self._progress_phases.pack(side="left", padx=4, pady=4)
+        self._progress_detail = ctk.CTkLabel(
+            progress_frame, text="Paso 0 · ciclo 0",
+            text_color=C["muted"], font=(MONO, 9), anchor="e")
+        self._progress_detail.pack(side="right", padx=8, pady=4)
+
+        # --- Enhanced explanation panel ---
+        explain_frame = ctk.CTkFrame(mid, fg_color=C["bg"], corner_radius=8,
+                                     border_width=2, border_color=C["cyan"])
+        explain_frame.pack(fill="x", padx=10, pady=(2, 4))
+        self.note_title = ctk.CTkLabel(explain_frame, text="",
+                                       text_color="#0e1320", font=(SANS, 13, "bold"),
+                                       anchor="w", fg_color=C["cyan"], corner_radius=4)
+        self.note_title.pack(fill="x", padx=4, pady=(4, 0))
+        self.note_box = ctk.CTkTextbox(explain_frame, height=84, fg_color=C["bg"],
+                                       text_color=C["text"],
+                                       font=(SANS, 13), wrap="word", border_width=0)
+        self.note_box.pack(fill="x", padx=6, pady=(2, 6))
+        self.note_box.tag_config("what", foreground=C["cyan"])
+        self.note_box.tag_config("next_h", foreground=C["orange"])
+        self.note_box.tag_config("val", foreground=C["green"])
         self.note_box.configure(state="disabled")
+
+        # --- Enhanced micro-operations log ---
         ctk.CTkLabel(mid, text="BITÁCORA DE MICRO-OPERACIONES", text_color=C["muted"],
                      font=(SANS, 10, "bold")).pack(anchor="w", padx=12)
         self.log = ctk.CTkTextbox(mid, height=110, fg_color=C["bg"], font=(MONO, 11),
                                   border_width=1, border_color=C["line"])
         self.log.pack(fill="both", expand=True, padx=10, pady=(2, 10))
+        # Base tags
         for tag, color in (("head", C["accent"]), ("err", C["red"]), ("ok", C["green"]),
                            ("dim", C["muted"])):
             self.log.tag_config(tag, foreground=color)
+        # Event category tags
+        for cat_info in _EVENT_CATEGORIES.values():
+            self.log.tag_config(cat_info["tag"], foreground=cat_info["color"])
+        # Separator tag
+        self.log.tag_config("separator", foreground=C["line"])
+        self.log.tag_config("cycle_head", foreground=C["accent"])
+        self.log.tag_config("phase_head", foreground=C["purple"])
         self.log.configure(state="disabled")
 
         # --- columna derecha: memoria
@@ -281,6 +370,23 @@ class App(ctk.CTk):
         except (ValueError, tk.TclError, AttributeError):
             pass
 
+    def _log_cycle_separator(self, cycle_num):
+        """Add a visual separator for a new instruction cycle."""
+        sep = f"{'─' * 40}\n"
+        self._append(self.log, sep, "separator")
+        self._append(self.log, f"  ● CICLO #{cycle_num}\n", "cycle_head")
+
+    def _log_phase_header(self, phase_name):
+        """Add a phase header with indentation."""
+        icon = {"FETCH": "📥", "DECODE": "🔍", "EXECUTE": "⚙️"}.get(phase_name, "▸")
+        self._append(self.log, f"  {icon} {phase_name}\n", "phase_head")
+
+    def _log_event(self, event):
+        """Log a single event with color-coding and icon."""
+        cat = _classify_event(event)
+        info = _EVENT_CATEGORIES.get(cat, _EVENT_CATEGORIES["control"])
+        self._append(self.log, f"      {info['prefix']} {event.text}\n", info["tag"])
+
     def _set_status(self, text, color=None):
         self.status_right.configure(text=text, text_color=color or C["muted"])
 
@@ -290,6 +396,7 @@ class App(ctk.CTk):
         self.console.configure(state="disabled")
         self.out_shown = 0
         self.wait_shown = False
+        self._step_number = 0
 
     # ================================================== cargar / ensamblar
     def load_example(self, name):
@@ -336,6 +443,9 @@ class App(ctk.CTk):
         self.cpu.load(prog.words)
         self.visited, self.alu_last = set(), "—"
         self.last_phase = None
+        self._log_cycle_num = 0
+        self._log_last_phase = None
+        self._phase_history = []
         self._clear_console()
         self.cfg.draw(prog)
         self._fill_analysis(prog)
@@ -367,6 +477,7 @@ class App(ctk.CTk):
     # ============================================================ control
     def reset_program(self):
         self._stop_run()
+        self._stop_input_flash()
         if self.program is None:
             return
         self.cpu.input_queue.clear()
@@ -375,6 +486,9 @@ class App(ctk.CTk):
         self._clear_console()
         self.last_transition = "—"
         self.last_phase = None
+        self._log_cycle_num = 0
+        self._log_last_phase = None
+        self._phase_history = []
         self._log("↻ Reiniciado (PC = 0, memoria recargada)", "dim")
         self._set_status("Reiniciado", C["muted"])
         self._render([])
@@ -437,6 +551,16 @@ class App(ctk.CTk):
             return
         prev = cpu.phase
         events = cpu.step_phase() if mode == "phase" else cpu.step_instruction()
+        if mode == "phase":
+            transition = f"{prev} → {cpu.phase}"
+        else:
+            transition = "FETCH → DECODE → EXECUTE"
+            if cpu.waiting_input:
+                transition += " (INPUT)"
+            elif cpu.halted and cpu.error:
+                transition += " (ERROR)"
+        self._phase_history.append(transition)
+        self._phase_history = self._phase_history[-4:]
         if prev == "FETCH" or mode == "instr":
             self.visited.add(cpu.cur_addr)
         if any(e.src == "ALU" and e.dst == "AC" for e in events):
@@ -448,19 +572,38 @@ class App(ctk.CTk):
         else:
             self.last_transition = f"instrucción completa → {cpu.phase}"
         if log:
+            self._step_number += 1
             if mode == "phase":
-                self._log(f"▸ {prev}", "head")
+                # Add cycle separator when starting a new FETCH
+                if prev == "FETCH":
+                    self._log_cycle_num += 1
+                    self._log_cycle_separator(self._log_cycle_num)
+                self._log_phase_header(prev)
+                for e in events:
+                    self._log_event(e)
             else:
-                self._log(f"▸ Instrucción en [{cpu.cur_addr}]: {disassemble(cpu.ir)}", "head")
-            for e in events:
-                self._log("    " + e.text)
+                self._log_cycle_num += 1
+                self._log_cycle_separator(self._log_cycle_num)
+                self._append(self.log,
+                             f"  ⚙️ Instrucción [{cpu.cur_addr:02d}]: {disassemble(cpu.ir)}\n",
+                             "phase_head")
+                for e in events:
+                    self._log_event(e)
+
+        # Console output with step numbers
         while self.out_shown < len(cpu.output):
-            self._append(self.console, f"▶ {cpu.output[self.out_shown]}\n", "out")
+            val = cpu.output[self.out_shown]
+            self._append(self.console, f"[paso {self._step_number}] ", "step_num")
+            self._append(self.console, "OUTPUT: ", "out_label")
+            self._append(self.console, f"{val}\n", "out")
             self.out_shown += 1
+
         if cpu.waiting_input:
             if not self.wait_shown:
-                self._append(self.console, "⏳ El programa pide un número. Escríbelo aquí.\n", "wait")
+                self._append(self.console,
+                             f"[paso {self._step_number}] ⏳ INPUT: escribe un número ↓\n", "wait")
                 self.wait_shown = True
+                self._start_input_flash()
             self.resume_after_input = self.running
             self._stop_run()
             self._set_status("Esperando entrada: escribe un número y pulsa Enter", C["cyan"])
@@ -475,6 +618,35 @@ class App(ctk.CTk):
             self._set_status("Ejecutando" if self.running else "Listo", C["accent"])
         self._render(events)
 
+    # --- Input prompt flashing ---
+    def _start_input_flash(self):
+        """Flash the input prompt border to draw attention."""
+        self._stop_input_flash()
+        self._input_flash_state = True
+        self._do_input_flash()
+
+    def _do_input_flash(self):
+        """Toggle input prompt border color."""
+        if not self.cpu.waiting_input:
+            self._stop_input_flash()
+            return
+        self._input_flash_state = not self._input_flash_state
+        color = C["orange"] if self._input_flash_state else C["cyan"]
+        self.entry.configure(border_color=color)
+        self._input_prompt.configure(text_color=color)
+        self._input_flash_id = self.after(500, self._do_input_flash)
+
+    def _stop_input_flash(self):
+        """Stop flashing the input prompt."""
+        if self._input_flash_id:
+            try:
+                self.after_cancel(self._input_flash_id)
+            except (ValueError, tk.TclError):
+                pass
+            self._input_flash_id = None
+        self.entry.configure(border_color=C["line"])
+        self._input_prompt.configure(text_color=C["cyan"])
+
     def submit_input(self, _event=None):
         text = self.entry.get().strip()
         try:
@@ -485,6 +657,7 @@ class App(ctk.CTk):
         self.cpu.provide_input(value)
         self.wait_shown = False
         self.entry.delete(0, "end")
+        self._stop_input_flash()
         self._append(self.console, f"⌨ {value}\n", "in")
         if self.resume_after_input:
             self.resume_after_input = False
@@ -500,10 +673,27 @@ class App(ctk.CTk):
                      wraplength=330, anchor="w").pack(fill="x", padx=12, pady=(0, 6))
 
     def _set_note(self, title, text):
-        self.note_title.configure(text=title)
+        """Enhanced explanation panel with 'what happened' / 'what's next' sections."""
+        # Title with contrasting background
+        display_title = f"  {title}  "
+        self.note_title.configure(text=display_title)
+
         self.note_box.configure(state="normal")
         self.note_box.delete("1.0", "end")
-        self.note_box.insert("1.0", text)
+
+        # Split text into main explanation and "Sigue:" part
+        parts = text.split("Sigue:")
+        main_text = parts[0].strip()
+        next_text = parts[1].strip() if len(parts) > 1 else None
+
+        # Highlight values in the text (numbers in specific patterns)
+        self.note_box.insert("end", main_text + "\n")
+
+        if next_text:
+            self.note_box.insert("end", "\n")
+            self.note_box.insert("end", "▸ Siguiente: ", "next_h")
+            self.note_box.insert("end", next_text + "\n")
+
         self.note_box.configure(state="disabled")
 
     def show_component(self, name):
@@ -571,6 +761,29 @@ class App(ctk.CTk):
         self._highlight_editor()
         self.entry.configure(border_color=C["cyan"] if cpu.waiting_input else C["line"])
         self._set_note(*notes.explain(cpu, self.last_phase))
+
+        # Instruction counter and current instruction
+        self._instr_counter.configure(
+            text=f"Instrucciones ejecutadas: {cpu.instructions_done}")
+        if cpu.mnemonic and not cpu.halted:
+            self._instr_current.configure(
+                text=f"▸ [{cpu.cur_addr:02d}] {disassemble(cpu.ir)}")
+        elif cpu.halted:
+            self._instr_current.configure(text="■ HALT")
+        else:
+            self._instr_current.configure(text="")
+        # Coverage info
+        if self.visited:
+            self._instr_coverage.configure(
+                text=f"Dirs. visitadas: {len(self.visited)}")
+        else:
+            self._instr_coverage.configure(text="")
+        self._progress_phases.configure(
+            text="  •  ".join(self._phase_history) if self._phase_history else cpu.phase,
+            text_color=C["red"] if cpu.halted else C["accent"])
+        self._progress_detail.configure(
+            text=f"Paso {self._step_number} · ciclo {self._log_cycle_num}")
+
         self.status_left.configure(
             text=f"Fase: {cpu.phase:<8} PC={cpu.pc:<3} AC={cpu.ac:<6} IR={cpu.ir:<6} "
                  f"Instrucciones: {cpu.instructions_done}")
