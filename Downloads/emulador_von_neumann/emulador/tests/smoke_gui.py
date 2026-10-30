@@ -18,7 +18,7 @@ tk.Canvas = Dummy; tk.LAST = "last"; tk.END = "end"; tk.TclError = Exception
 tk.filedialog = types.ModuleType("tkinter.filedialog")
 ctk = types.ModuleType("customtkinter")
 for n in ("CTkFrame","CTkButton","CTkLabel","CTkTextbox","CTkEntry","CTkSlider",
-          "CTkOptionMenu","CTkTabview","CTkScrollbar"):
+          "CTkOptionMenu","CTkTabview","CTkScrollbar","CTkToplevel"):
     setattr(ctk, n, Dummy)
 ctk.CTk = Dummy
 ctk.set_appearance_mode = lambda m: None
@@ -129,4 +129,26 @@ print("consola, atajos y clic en componentes: OK")
 for f in sorted(os.listdir(appmod.PROG_DIR)):
     if f.startswith("99"): continue
     a = make_app(); load(a, f); a.step_phase()
+
+# 7) ventana DLL: solo formulario + código asm de solo lectura (sin compilación)
+app = make_app()
+win = app.open_suma_dll()
+for attr in ("sumar", "btn_sumar", "entry_a", "entry_b",
+             "error_label", "result_label", "detail_label"):
+    assert attr in win.__dict__, "falta win." + attr
+for attr in ("editor", "func_entry", "btn_compilar", "btn_restaurar",
+             "salida", "compilar", "restaurar"):
+    assert attr not in win.__dict__, "no debe existir win." + attr
+print("ventana DLL simple (formulario + suma.asm de solo lectura): OK")
+
+# 8) ventana NASM x64: botón único + consola + entrada interactiva (sin compilar nada)
+app = make_app()
+win = app.open_nasm_run()
+for attr in ("editor", "btn_ejecutar", "btn_restaurar", "salida",
+             "ejecutar", "restaurar",
+             "entry_in", "btn_enviar", "btn_detener", "enviar"):
+    assert attr in win.__dict__, "falta win." + attr
+assert win.nasm_proc is None, "la ventana debe abrir sin proceso activo"
+print("ventana NASM x64 (botón único + consola + entrada interactiva): OK")
+
 print("OK: GUI lógica sin errores; llamadas a widgets simulados:", Dummy.calls)

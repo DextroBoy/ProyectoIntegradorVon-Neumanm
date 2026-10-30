@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+dll/temporal/
+
+# artefactos generados por asm64/runner.py (se recompilan en cada ejecucion)
+asm64/run.asm
+asm64/run.obj
+asm64/run.exe

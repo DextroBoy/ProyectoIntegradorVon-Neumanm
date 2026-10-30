@@ -1,6 +1,8 @@
 """Ventana principal del emulador Von Neumann (customtkinter)."""
 import os
 import sys
+import threading
+import time
 import tkinter as tk
 from tkinter import filedialog
 
@@ -21,6 +23,45 @@ from gui.views import (C, MONO, SANS, ArchView, AutomatonView,  # noqa: E402
 
 PROG_DIR = os.path.join(ROOT, "programas")
 SPEEDS = {1: 1000, 2: 700, 3: 450, 4: 300, 5: 200, 6: 120, 7: 70, 8: 40, 9: 15, 10: 1}
+
+# Plantilla que se carga al elegir "✎ Crear propio asm" en el menú de programas.
+# Usa la sintaxis real del ISA educativo (LOAD/ADD/OUTPUT/HALT y etiquetas con ":").
+CUSTOM_TEMPLATE = """; ✎ Tu propio programa ensamblador
+; Modifica esto libremente y presiona F5:
+; se ensambla y ejecuta automáticamente.
+
+INICIO: LOAD  A        ; AC = A
+        ADD   B        ; AC = A + B
+        OUTPUT         ; muestra AC (la suma) en la consola
+        HALT           ; termina
+
+A:      DAT 3
+B:      DAT 5
+"""
+
+# Respaldo solo-ASCII para la vista del código NASM de la ventana DLL. Se usa
+# unicamente si no se puede leer dll/suma.asm (p. ej. si el archivo fue borrado).
+FALLBACK_SUMA_ASM = """; =====================================================================
+;  suma.asm  -  funcion suma(a, b) para Windows x64, ensamblada con NASM
+; ---------------------------------------------------------------------
+;  Convencion de llamada Microsoft x64:
+;    * 1er argumento entero  -> RCX
+;    * 2do argumento entero  -> RDX
+;    * valor de retorno      -> RAX
+; =====================================================================
+
+bits 64
+default rel
+
+global suma
+
+section .text
+
+suma:
+    mov rax, rcx
+    add rax, rdx
+    ret
+"""
 
 
 class App(ctk.CTk):
@@ -58,12 +99,17 @@ class App(ctk.CTk):
                         ("<F7>", self.step_instruction), ("<F8>", self.reset_program)):
             self.bind(key, lambda e, f=fn: f())
 
+        self.special = "✎ Crear propio asm"
         self.examples = sorted(f for f in os.listdir(PROG_DIR) if f.endswith(".asm")) \
             if os.path.isdir(PROG_DIR) else []
+        # La opción para escribir asm propio siempre va primero.
+        self.example_menu.configure(values=[self.special] + self.examples)
         if self.examples:
-            self.example_menu.configure(values=self.examples)
+            # El autoload inicial sigue cargando el PRIMER EJEMPLO REAL.
             self.example_menu.set(self.examples[0])
             self.load_example(self.examples[0])
+        else:
+            self.example_menu.set(self.special)
 
     # ================================================================ UI
     def _btn(self, parent, text, cmd, color=None, width=120):
@@ -82,11 +128,476 @@ class App(ctk.CTk):
         self._btn(bar, "→ Fase  F6", self.step_phase, width=110).pack(side="left", padx=4)
         self._btn(bar, "⇥ Instrucción  F7", self.step_instruction, width=150).pack(side="left", padx=4)
         self._btn(bar, "↻ Reiniciar  F8", self.reset_program, width=130).pack(side="left", padx=4)
+        self.btn_dll = self._btn(bar, "Σ Suma via DLL", self.open_suma_dll, width=150)
+        self.btn_dll.pack(side="left", padx=4)
+        self.btn_nasm = self._btn(bar, "▶ Programa NASM x64", self.open_nasm_run, width=160)
+        self.btn_nasm.pack(side="left", padx=4)
         ctk.CTkLabel(bar, text="Velocidad", text_color=C["muted"],
                      font=(SANS, 11)).pack(side="left", padx=(24, 6))
         self.speed = ctk.CTkSlider(bar, from_=1, to=10, number_of_steps=9, width=170)
         self.speed.set(4)
         self.speed.pack(side="left", padx=4)
+
+    def open_suma_dll(self):
+        """Ventana: suma real por DLL (suma.dll) + código NASM x64 de suma.asm."""
+        dll_path = os.path.join(ROOT, "dll", "suma.dll")
+        src_path = os.path.join(ROOT, "dll", "llamar_suma.py")
+
+        win = ctk.CTkToplevel(self)
+        win.title("Suma via DLL (NASM x64) · suma.asm")
+        win.geometry("720x640")
+        win.minsize(660, 560)
+        win.configure(fg_color=C["bg"])
+        win.transient(self)
+
+        # ------------------------------------------------ (a) función existente
+        ctk.CTkLabel(win, text="SUMA CALCULADA POR UNA DLL REAL (NASM x64)",
+                     font=(SANS, 15, "bold"), text_color=C["text"]).pack(pady=(14, 2))
+        ctk.CTkLabel(win, text=".asm → nasm -f win64 → .obj → gcc -shared → .dll → "
+                               "llamada desde Python con ctypes",
+                     font=(SANS, 11), text_color=C["muted"], wraplength=640,
+                     justify="center").pack(padx=20)
+
+        form = ctk.CTkFrame(win, fg_color=C["panel"], corner_radius=10)
+        form.pack(fill="x", padx=20, pady=(10, 6))
+        form.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkLabel(form, text="Número A", font=(SANS, 12, "bold"),
+                     text_color=C["muted"]).grid(row=0, column=0, sticky="w",
+                                                 padx=14, pady=(8, 2))
+        ctk.CTkLabel(form, text="Número B", font=(SANS, 12, "bold"),
+                     text_color=C["muted"]).grid(row=0, column=1, sticky="w",
+                                                 padx=14, pady=(8, 2))
+        entry_a = ctk.CTkEntry(form, placeholder_text="p. ej. 4", border_width=2,
+                               border_color=C["line"], font=(MONO, 14))
+        entry_a.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+        entry_b = ctk.CTkEntry(form, placeholder_text="p. ej. 5", border_width=2,
+                               border_color=C["line"], font=(MONO, 14))
+        entry_b.grid(row=1, column=1, sticky="ew", padx=14, pady=(0, 10))
+
+        actions = ctk.CTkFrame(win, fg_color="transparent")
+        actions.pack(pady=(0, 2))
+        btn_sumar = ctk.CTkButton(actions, text="Sumar", width=130, height=32,
+                                  fg_color=C["accent"], hover_color=C["line"],
+                                  text_color=C["text"], corner_radius=8,
+                                  font=(SANS, 12, "bold"))
+        btn_sumar.pack(side="left", padx=6)
+        btn_ver = ctk.CTkButton(actions, text="Ver llamar_suma.py", width=170, height=32,
+                                fg_color=C["box"], hover_color=C["line"],
+                                text_color=C["text"], corner_radius=8,
+                                font=(SANS, 12, "bold"))
+        btn_ver.pack(side="left", padx=6)
+
+        error = ctk.CTkLabel(win, text="", font=(SANS, 12, "bold"),
+                             text_color=C["red"], wraplength=640, justify="center")
+        result = ctk.CTkLabel(win, text="Resultado: —", font=(SANS, 20, "bold"),
+                              text_color=C["accent"])
+        detail = ctk.CTkLabel(win, text="", font=(SANS, 11), text_color=C["muted"])
+        error.pack()
+        result.pack(pady=(2, 0))
+        detail.pack()
+
+        def sumar():
+            error.configure(text="")
+            try:
+                a = int(entry_a.get().strip())
+                b = int(entry_b.get().strip())
+            except ValueError:
+                result.configure(text="Resultado: —")
+                detail.configure(text="")
+                error.configure(text="✖ Escribe dos números enteros válidos.")
+                return
+            if not os.path.isfile(dll_path):
+                result.configure(text="Resultado: —")
+                detail.configure(text="")
+                error.configure(text="✖ No se encontró dll\\suma.dll.\n"
+                                     "Compílala con dll\\compilar.bat y vuelve a intentar.")
+                return
+            try:
+                # Import perezoso: si la DLL falta, la GUI igual arranca sin problemas.
+                from dll.llamar_suma import suma_dll
+                valor = suma_dll(a, b)
+            except Exception as exc:  # DLL corrupta, símbolo ausente, etc.
+                result.configure(text="Resultado: —")
+                detail.configure(text="")
+                error.configure(text=f"✖ No se pudo llamar a suma.dll: {exc}")
+                return
+            result.configure(text=f"Resultado: {valor}")
+            detail.configure(text="(calculado por suma.dll)")
+
+        def ver_codigo():
+            sub = ctk.CTkToplevel(win)
+            sub.title("dll/llamar_suma.py")
+            sub.geometry("620x420")
+            sub.configure(fg_color=C["bg"])
+            sub.transient(win)
+            ctk.CTkLabel(sub, text="dll\\llamar_suma.py  ·  todo el código Python necesario",
+                         font=(SANS, 12, "bold"), text_color=C["muted"]).pack(
+                anchor="w", padx=12, pady=(10, 4))
+            box = ctk.CTkTextbox(sub, fg_color=C["panel"], text_color=C["text"],
+                                 font=(MONO, 12), wrap="none", border_width=1,
+                                 border_color=C["line"])
+            box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+            try:
+                with open(src_path, encoding="utf-8") as f:
+                    box.insert("1.0", f.read())
+            except OSError as exc:
+                box.insert("1.0", f"No se pudo leer el archivo:\n{exc}")
+            box.configure(state="disabled")
+
+        btn_sumar.configure(command=sumar)
+        btn_ver.configure(command=ver_codigo)
+
+        # ------------------------------------------------ (b) código NASM (solo lectura)
+        ctk.CTkFrame(win, fg_color=C["line"], height=1).pack(
+            fill="x", padx=20, pady=(8, 6))
+
+        head = ctk.CTkFrame(win, fg_color="transparent")
+        head.pack(fill="x", padx=20)
+        ctk.CTkLabel(head, text="CÓDIGO NASM X64 (dll/suma.asm)",
+                     font=(SANS, 11, "bold"), text_color=C["accent"]).pack(side="left")
+        btn_recargar = ctk.CTkButton(head, text="↺ Recargar", width=110, height=28,
+                                     fg_color=C["box"], hover_color=C["line"],
+                                     text_color=C["text"], corner_radius=8,
+                                     font=(SANS, 11, "bold"))
+        btn_recargar.pack(side="right")
+
+        codigo = ctk.CTkTextbox(win, fg_color=C["bg"], text_color=C["text"],
+                                font=(MONO, 11), wrap="none", border_width=1,
+                                border_color=C["line"])
+        codigo.pack(fill="both", expand=True, padx=20, pady=(4, 12))
+
+        def leer_suma_asm():
+            """Contenido real de dll/suma.asm; respaldo ASCII si no se puede leer."""
+            try:
+                with open(os.path.join(ROOT, "dll", "suma.asm"), encoding="utf-8") as f:
+                    return f.read()
+            except OSError:
+                return FALLBACK_SUMA_ASM
+
+        def recargar_codigo():
+            codigo.configure(state="normal")
+            codigo.delete("1.0", "end")
+            codigo.insert("1.0", leer_suma_asm())
+            codigo.configure(state="disabled")
+
+        recargar_codigo()
+        btn_recargar.configure(command=recargar_codigo)
+
+        entry_a.bind("<Return>", lambda e: sumar())
+        entry_b.bind("<Return>", lambda e: sumar())
+        win.after(120, entry_a.focus_set)
+
+        # Referencias para pruebas de humo y para depuración.
+        win.btn_sumar = btn_sumar
+        win.entry_a = entry_a
+        win.entry_b = entry_b
+        win.error_label = error
+        win.result_label = result
+        win.detail_label = detail
+        win.sumar = sumar
+        return win
+
+    def open_nasm_run(self):
+        """Ventana: programa NASM x64 completo, ensamblado, enlazado y ejecutado.
+
+        Un solo botón decide el modo de ejecución según el código del editor:
+
+        * sin ``scanf`` → ejecución INTERACTIVA en esta ventana: la salida
+          llega en vivo por pipes y la fila ENTRADA escribe en su stdin;
+        * con ``scanf`` → se compila y se lanza ``run.exe`` en una ventana de
+          consola real de Windows, donde printf/scanf funcionan al 100%.
+        """
+        win = ctk.CTkToplevel(self)
+        win.title("Programa NASM x64 · ensamblar y ejecutar nativamente")
+        win.geometry("780x790")
+        win.minsize(700, 640)
+        win.configure(fg_color=C["bg"])
+        win.transient(self)
+
+        # Cada vez que se abre la ventana se empieza sin proceso.
+        win.nasm_proc = None
+        win._nasm_compilando = False
+
+        ctk.CTkLabel(win, text="PROGRAMA NASM X64 (ejecutable nativo)",
+                     font=(SANS, 15, "bold"), text_color=C["text"]).pack(pady=(14, 2))
+        ctk.CTkLabel(win, text="run.asm → nasm → gcc → run.exe · interacción en vivo "
+                               "con la consola",
+                     font=(SANS, 11), text_color=C["muted"], wraplength=700,
+                     justify="center").pack(padx=20)
+
+        def plantilla_demo():
+            """Import perezoso: si asm64.runner falta, la GUI igual funciona."""
+            try:
+                from asm64.runner import PLANTILLA_DEMO
+                return PLANTILLA_DEMO
+            except Exception as exc:  # módulo ausente, error de sintaxis, etc.
+                return f"; ✖ No se pudo cargar asm64.runner: {exc}\n"
+
+        editor = ctk.CTkTextbox(win, fg_color=C["panel"], text_color=C["text"],
+                                font=(MONO, 12), wrap="none", border_width=1,
+                                border_color=C["line"])
+        editor.pack(fill="both", expand=True, padx=20, pady=(12, 6))
+        editor.insert("1.0", plantilla_demo())
+
+        acciones = ctk.CTkFrame(win, fg_color="transparent")
+        acciones.pack(fill="x", padx=20)
+        btn_ejecutar = ctk.CTkButton(acciones, text="⚙ Ensamblar y ejecutar", width=200,
+                                     height=34, fg_color=C["accent"],
+                                     hover_color=C["line"], text_color=C["text"],
+                                     corner_radius=8, font=(SANS, 12, "bold"))
+        btn_ejecutar.pack(side="left")
+        btn_restaurar = ctk.CTkButton(acciones, text="↺ Restaurar plantilla", width=180,
+                                      height=34, fg_color=C["box"],
+                                      hover_color=C["line"], text_color=C["text"],
+                                      corner_radius=8, font=(SANS, 12, "bold"))
+        btn_restaurar.pack(side="left", padx=8)
+        btn_detener = ctk.CTkButton(acciones, text="⏹ Detener", width=110,
+                                    height=34, fg_color=C["red"],
+                                    hover_color=C["line"], text_color=C["text"],
+                                    corner_radius=8, font=(SANS, 12, "bold"))
+        btn_detener.pack(side="right")
+
+        ctk.CTkLabel(win, text="Un solo botón decide el modo: si tu programa no usa "
+                               "'scanf', la salida sale en esta consola; si usa 'scanf' "
+                               "(pedir datos) se abre una ventana de consola de Windows "
+                               "para responder los datos ahí mismo. Tu programa debe "
+                               "definir 'main' (global) y puede usar 'extern printf' y "
+                               "'extern scanf' — gcc enlaza la CRT.",
+                     font=(SANS, 11), text_color=C["muted"], wraplength=700,
+                     justify="left").pack(anchor="w", padx=20, pady=(8, 4))
+
+        ctk.CTkLabel(win, text="SALIDA DEL PROGRAMA", font=(SANS, 11, "bold"),
+                     text_color=C["accent"]).pack(anchor="w", padx=20)
+        salida = ctk.CTkTextbox(win, height=180, fg_color=C["bg"], text_color=C["text"],
+                                font=(MONO, 11), wrap="none", border_width=1,
+                                border_color=C["line"])
+        salida.pack(fill="both", expand=False, padx=20, pady=(4, 10))
+        salida.configure(state="disabled")
+
+        # ------------------------------------------------ fila de ENTRADA
+        ctk.CTkLabel(win, text="ENTRADA (stdin del programa)", font=(SANS, 11, "bold"),
+                     text_color=C["accent"]).pack(anchor="w", padx=20)
+        entrada = ctk.CTkFrame(win, fg_color="transparent")
+        entrada.pack(fill="x", padx=20, pady=(4, 16))
+        ctk.CTkLabel(entrada, text="›", text_color=C["cyan"],
+                     font=(MONO, 16, "bold"), width=14).pack(side="left")
+        entry_in = ctk.CTkEntry(
+            entrada,
+            placeholder_text="▸ Escribe aquí lo que pide tu programa "
+                             "(números, opción del menú…) y presiona Enviar",
+            border_width=2, border_color=C["line"], font=(MONO, 12))
+        entry_in.pack(side="left", fill="x", expand=True, padx=(2, 8))
+        btn_enviar = ctk.CTkButton(entrada, text="Enviar ▸", width=120, height=34,
+                                   fg_color=C["accent"], hover_color=C["line"],
+                                   text_color=C["text"], corner_radius=8,
+                                   font=(SANS, 12, "bold"))
+        btn_enviar.pack(side="left")
+
+        def _log_salida(texto):
+            """Agrega texto a la consola sin borrar lo anterior (hilo de Tk)."""
+            try:
+                salida.configure(state="normal")
+                salida.insert("end", texto)
+                salida.see("end")
+                salida.configure(state="disabled")
+            except tk.TclError:
+                pass  # ventana ya cerrada
+
+        def on_salida(texto):
+            """Callback del lector: se reenvía SIEMPRE al hilo de Tk."""
+            try:
+                win.after(0, lambda t=texto: _log_salida(t))
+            except (tk.TclError, RuntimeError):
+                pass
+
+        def enviar():
+            proc = getattr(win, "nasm_proc", None)
+            texto = entry_in.get()
+            entry_in.delete(0, "end")
+            if proc is None or not getattr(proc, "activo", False):
+                _log_salida("\n✖ No hay programa en ejecución. Presiona "
+                            "\"⚙ Ensamblar y ejecutar\" primero.\n")
+                return
+            try:
+                enviado = proc.enviar_linea(texto)
+            except Exception as exc:
+                _log_salida(f"\n✖ No se pudo enviar la entrada: {exc}\n")
+                return
+            if enviado:
+                _log_salida(f"› {texto}\n")
+
+        def detener():
+            proc = getattr(win, "nasm_proc", None)
+            if proc is None or not getattr(proc, "activo", False):
+                _log_salida("\n⏹ No hay programa en ejecución.\n")
+                return
+            try:
+                proc.detener()
+            except Exception as exc:
+                _log_salida(f"\n✖ No se pudo detener el proceso: {exc}\n")
+                return
+            _log_salida("\n⏹ Deteniendo el proceso...\n")
+
+        def _avisar(texto):
+            """Escribe en la consola desde un hilo de trabajo (vía Tk)."""
+            try:
+                win.after(0, lambda t=texto: _log_salida(t))
+            except (tk.TclError, RuntimeError):
+                pass
+
+        def _fin_ejecucion(ok, log, usa_scanf):
+            """Cierra el estado 'Ensamblando...' y reporta el resultado."""
+            win._nasm_compilando = False
+            try:
+                btn_ejecutar.configure(text="⚙ Ensamblar y ejecutar", state="normal")
+            except tk.TclError:
+                pass
+            _log_salida("\n" + (log or "✖ Sin detalle") + "\n")
+            if not ok:
+                return
+            if usa_scanf:
+                _log_salida("\n▶ La ventana de consola ya abrió: escribe los datos "
+                            "que pida tu programa ahi.\n")
+            else:
+                _log_salida("\n▶ Programa iniciado — responde en ENTRADA cuando "
+                            "pida datos.\n")
+                try:
+                    entry_in.focus_set()
+                except tk.TclError:
+                    pass
+
+        def ejecutar():
+            """Un solo botón: elige solo el modo según el código del editor."""
+            if getattr(win, "_nasm_compilando", False):
+                _log_salida("\n⏳ Ya hay una compilación en curso; espera un momento.\n")
+                return
+            src = editor.get("1.0", "end-1c")
+
+            # Detener cualquier ejecución interactiva anterior antes de
+            # recompilar (en Windows run.exe quedaría bloqueado).
+            anterior = getattr(win, "nasm_proc", None)
+            if anterior is not None and getattr(anterior, "activo", False):
+                try:
+                    # Evita que el programa viejo siga escribiendo en la
+                    # consola que vamos a limpiar.
+                    anterior.on_salida = lambda texto: None
+                    anterior.detener()
+                except Exception:
+                    pass
+                viejo = getattr(anterior, "proc", None)
+                fin = time.time() + 1.0
+                while (viejo is not None and viejo.poll() is None
+                       and time.time() < fin):
+                    time.sleep(0.02)
+            win.nasm_proc = None
+
+            win._nasm_compilando = True
+            # El botón se deshabilita mientras compila; se rehabilita al
+            # terminar en cualquiera de los dos caminos.
+            try:
+                btn_ejecutar.configure(text="⏳ Ensamblando...", state="disabled")
+            except tk.TclError:
+                pass
+
+            # La consola se limpia al COMENZAR (antes de lanzar el hilo).
+            try:
+                salida.configure(state="normal")
+                salida.delete("1.0", "end")
+                salida.insert("1.0", "⏳ Ensamblando y enlazando...\n")
+                salida.see("end")
+                salida.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+            def worker():
+                # Detección de modo: 'scanf' (extern/call, cualquier caja)
+                # exige una consola real porque la CRT bufferiza stdout al
+                # ser un pipe.
+                usa_scanf = "scanf" in src.lower()
+                if usa_scanf:
+                    _avisar("\n[modo] ✦ Tu programa usa scanf → se abrira una "
+                            "VENTANA DE CONSOLA DE WINDOWS (interactua ahi; "
+                            "printf/scanf/pause funcionan al 100%).\n")
+                else:
+                    _avisar("\n[modo] ✦ Tu programa no usa scanf → saldrá en esta "
+                            "consola (usa ENTRADA abajo si hiciera falta responder "
+                            "algo).\n")
+
+                try:
+                    # Import perezoso: si asm64.runner falta, la GUI sigue viva.
+                    from asm64.runner import (PLANTILLA_DEMO, NasmProceso,
+                                              lanzar_consola)
+                    _ = PLANTILLA_DEMO  # se importa junto al resto (misma carga)
+                except Exception as exc:
+                    aviso = f"✖ No se pudo importar asm64.runner:\n{exc}"
+                    try:
+                        win.after(0, lambda a=aviso: _fin_ejecucion(
+                            False, a, usa_scanf))
+                    except (tk.TclError, RuntimeError):
+                        pass
+                    return
+
+                if usa_scanf:
+                    # Sin pipes: la interacción ocurre en la ventana de cmd.
+                    try:
+                        ok, log = lanzar_consola(src)
+                    except Exception as exc:
+                        ok, log = False, f"✖ Error inesperado al compilar: {exc}"
+                    win.nasm_proc = None
+                    try:
+                        win.after(0, lambda: _fin_ejecucion(ok, log, True))
+                    except (tk.TclError, RuntimeError):
+                        pass
+                    return
+
+                # Modo interactivo de siempre: salida en vivo por pipes.
+                proceso = NasmProceso(on_salida=on_salida)
+                win.nasm_proc = proceso
+                ok, log = proceso.iniciar(src)
+                try:
+                    win.after(0, lambda: _fin_ejecucion(ok, log, False))
+                except (tk.TclError, RuntimeError):
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def restaurar():
+            editor.delete("1.0", "end")
+            editor.insert("1.0", plantilla_demo())
+
+        def cerrar_ventana():
+            """Al cerrar: detener el proceso y destruir la ventana."""
+            try:
+                proc = getattr(win, "nasm_proc", None)
+                if proc is not None:
+                    proc.detener()
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        btn_ejecutar.configure(command=ejecutar)
+        btn_restaurar.configure(command=restaurar)
+        btn_enviar.configure(command=enviar)
+        btn_detener.configure(command=detener)
+        entry_in.bind("<Return>", lambda e: enviar())
+        win.protocol("WM_DELETE_WINDOW", cerrar_ventana)
+
+        # Referencias para pruebas de humo y para depuración.
+        win.editor = editor
+        win.btn_ejecutar = btn_ejecutar
+        win.btn_restaurar = btn_restaurar
+        win.salida = salida
+        win.ejecutar = ejecutar
+        win.restaurar = restaurar
+        win.entry_in = entry_in
+        win.btn_enviar = btn_enviar
+        win.btn_detener = btn_detener
+        win.enviar = enviar
+        win.detener = detener
+        return win
 
     def _build_sim_tab(self, tab):
         tab.grid_columnconfigure(0, weight=0)
@@ -293,8 +804,39 @@ class App(ctk.CTk):
 
     # ================================================== cargar / ensamblar
     def load_example(self, name):
+        if name == self.special:
+            self.start_custom_asm()
+            return
         self._set_editor(self._read(os.path.join(PROG_DIR, name)))
         self.assemble_current()
+
+    def start_custom_asm(self):
+        """Carga la plantilla editable y la deja ensamblada, lista para F5."""
+        self._stop_run()
+        self._set_editor(CUSTOM_TEMPLATE)
+        self.editor.tag_remove("err", "1.0", "end")
+
+        # Estado limpio: nada de la ejecución anterior debe sobrevivir.
+        self.program, self.source = None, None
+        self.visited, self.last_phase = set(), None
+        self.last_transition = "—"
+        self.cpu.input_queue.clear()
+        self._clear_console()
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+        # Ensambla la plantilla de inmediato (queda lista para ejecutar).
+        self.assemble_current()
+
+        try:
+            self.editor.focus_set()
+        except (AttributeError, tk.TclError):
+            pass
+        self._log("✎ Modo CREAR PROPIO ASM: plantilla cargada; edita el código y presiona F5.")
+        self._set_status(
+            "✎ Modo propio: escribe tu asm y presiona F5 — se ensambla y ejecuta solo",
+            C["cyan"])
 
     def open_file(self):
         path = filedialog.askopenfilename(
