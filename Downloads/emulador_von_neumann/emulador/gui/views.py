@@ -102,7 +102,7 @@ class ArchView:
                        font=(SANS, 10, "bold"))
         for a, b in LINKS:
             p1, p2 = self._edge(a, b)
-            cv.create_line(*p1, *p2, fill=C["line"], width=2, dash=(3, 3))
+            cv.create_line(*self._s(p1[0], p1[1], p2[0], p2[1]), fill=C["line"], width=2, dash=(3, 3))
         for name, (x1, y1, x2, y2) in BOXES.items():
             self.rect[name] = cv.create_rectangle(*self._s(x1, y1, x2, y2), fill=C["box"],
                                                   outline=C["line"], width=2)
@@ -282,18 +282,21 @@ class ArchView:
             if e.src == e.dst:
                 continue
             p1, p2 = self._edge(e.src, e.dst)
+            scaled_p1 = self._s(*p1)
+            scaled_p2 = self._s(*p2)
             # Thicker, brighter arrow
-            self.hl.append(cv.create_line(*p1, *p2, arrow=tk.LAST, width=4,
+            self.hl.append(cv.create_line(*scaled_p1, *scaled_p2,
+                                          arrow=tk.LAST, width=4,
                                           fill=C["accent"],
                                           arrowshape=(12, 14, 6)))
             # Data label on the arrow - extract value from event text
             label_text = self._extract_arrow_label(e)
             if label_text:
-                mid_x = (p1[0] + p2[0]) / 2
-                mid_y = (p1[1] + p2[1]) / 2
+                mid_x = (scaled_p1[0] + scaled_p2[0]) / 2
+                mid_y = (scaled_p1[1] + scaled_p2[1]) / 2
                 # Background for label
-                bg = cv.create_rectangle(mid_x - 18, mid_y - 8,
-                                         mid_x + 18, mid_y + 8,
+                bg = cv.create_rectangle(mid_x - 18 * S, mid_y - 8 * S,
+                                         mid_x + 18 * S, mid_y + 8 * S,
                                          fill=C["panel"], outline=C["accent"], width=1)
                 lbl = cv.create_text(mid_x, mid_y, text=label_text,
                                      fill=C["orange"], font=(MONO, 7, "bold"))
