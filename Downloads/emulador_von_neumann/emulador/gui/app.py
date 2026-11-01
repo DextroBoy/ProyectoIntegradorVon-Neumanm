@@ -130,8 +130,6 @@ class App(ctk.CTk):
         self._btn(bar, "↻ Reiniciar  F8", self.reset_program, width=130).pack(side="left", padx=4)
         self.btn_dll = self._btn(bar, "Σ Suma via DLL", self.open_suma_dll, width=150)
         self.btn_dll.pack(side="left", padx=4)
-        self.btn_nasm = self._btn(bar, "▶ Programa NASM x64", self.open_nasm_run, width=160)
-        self.btn_nasm.pack(side="left", padx=4)
         ctk.CTkLabel(bar, text="Velocidad", text_color=C["muted"],
                      font=(SANS, 11)).pack(side="left", padx=(24, 6))
         self.speed = ctk.CTkSlider(bar, from_=1, to=10, number_of_steps=9, width=170)

@@ -85,7 +85,7 @@ class ArchView:
                        font=(SANS, 10, "bold"))
         for a, b in LINKS:
             p1, p2 = self._edge(a, b)
-            cv.create_line(*p1, *p2, fill=C["line"], width=2, dash=(3, 3))
+            cv.create_line(*self._s(p1[0], p1[1], p2[0], p2[1]), fill=C["line"], width=2, dash=(3, 3))
         for name, (x1, y1, x2, y2) in BOXES.items():
             self.rect[name] = cv.create_rectangle(*self._s(x1, y1, x2, y2), fill=C["box"],
                                                   outline=C["line"], width=2)
@@ -131,7 +131,7 @@ class ArchView:
             if e.src == e.dst:
                 continue
             p1, p2 = self._edge(e.src, e.dst)
-            self.hl.append(cv.create_line(*p1, *p2, arrow=tk.LAST, width=3, fill=C["accent"],
+            self.hl.append(cv.create_line(*self._s(p1[0], p1[1], p2[0], p2[1]), arrow=tk.LAST, width=3, fill=C["accent"],
                                           arrowshape=(10, 12, 5)))
 
         cv.itemconfig(self.flags, text=f"Z = {int(cpu.zero)}    N = {int(cpu.negative)}")
